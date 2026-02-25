@@ -6,7 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "tifffile"
 dynamic = ["version"]
 description = "Read and write TIFF files"
-license = "BSD-3-Clause"
+license = "BSD-3-Clause AND MIT"
 requires-python = ">=3.11"
 authors = [
     {name = "Christoph Gohlke", email = "cgohlke@cgohlke.com"},

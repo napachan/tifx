@@ -17,10 +17,13 @@ compression codecs via imagecodecs. All original functionality is preserved.
 License
 -------
 
-The original tifffile is copyright (c) 2008-2026 Christoph Gohlke and
-distributed under the **BSD-3-Clause** license. See the LICENSE file for
-the full text. All modifications in this fork are distributed under the
-same license.
+- **Original tifffile code**: BSD-3-Clause, copyright (c) 2008-2026
+  Christoph Gohlke. Files retaining the original copyright header
+  (``tifffile.py``, ``zarr.py``, ``test_tifffile.py``).
+- **New modules in this fork**: MIT, copyright (c) 2025-2026 napachan.
+  All new files (camera, gpu, C++ extension, extracted modules, etc.).
+
+See the LICENSE file for full text of both licenses.
 
 New Features
 ============
@@ -241,4 +244,5 @@ Original tifffile library by
 `Christoph Gohlke <https://www.cgohlke.com>`_
 (`GitHub <https://github.com/cgohlke/tifffile>`_,
 `DOI: 10.5281/zenodo.6795860 <https://doi.org/10.5281/zenodo.6795860>`_).
-Licensed under BSD-3-Clause. See LICENSE for details.
+Original code licensed under BSD-3-Clause. New modules licensed under MIT.
+See LICENSE for details.
