@@ -176,3 +176,19 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Claude Code
+.claude/
+
+# Temporary test files
+_*.tif
+_*.ome.tif
+*.pyd
+
+# Test data (downloaded/generated)
+tests/data/
+
+# Debug artifacts
+skipped_test_names.txt
+skipped_tests.txt
+metrics/

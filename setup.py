@@ -100,7 +100,7 @@ setup(
         'Source Code': 'https://github.com/cgohlke/tifffile',
         # 'Documentation': 'https://',
     },
-    packages=['tifffile'],
+    packages=['tifffile', 'tifffile.series_parsers'],
     package_data={'tifffile': ['py.typed']},
     python_requires='>=3.11',
     install_requires=[

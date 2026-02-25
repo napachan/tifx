@@ -1,6 +1,82 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "tifffile"
+dynamic = ["version"]
+description = "Read and write TIFF files"
+license = "BSD-3-Clause"
+requires-python = ">=3.11"
+authors = [
+    {name = "Christoph Gohlke", email = "cgohlke@cgohlke.com"},
+]
+dependencies = ["numpy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://www.cgohlke.com"
+"Bug Tracker" = "https://github.com/cgohlke/tifffile/issues"
+"Source Code" = "https://github.com/cgohlke/tifffile"
+
+[project.optional-dependencies]
+codecs = ["imagecodecs>=2025.11.11"]
+xml = ["defusedxml", "lxml"]
+zarr = ["zarr>=3.1.3", "fsspec", "kerchunk"]
+plot = ["matplotlib"]
+all = [
+    "imagecodecs>=2025.11.11",
+    "matplotlib",
+    "defusedxml",
+    "lxml",
+    "zarr>=3.1.3",
+    "fsspec",
+    "kerchunk",
+]
+test = [
+    "cmapfile",
+    "czifile",
+    "dask",
+    "defusedxml",
+    "fsspec",
+    "imagecodecs",
+    "kerchunk",
+    "lfdfiles",
+    "lxml",
+    "ndtiff",
+    "oiffile",
+    "psdtags",
+    "pytest",
+    "requests",
+    "roifile",
+    "xarray",
+    "zarr>=3.1.3",
+]
+
+[project.scripts]
+tifffile = "tifffile:main"
+tiffcomment = "tifffile.tiffcomment:main"
+tiff2fsspec = "tifffile.tiff2fsspec:main"
+lsm2bin = "tifffile.lsm2bin:main"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["tifffile"]
+wheel.exclude = ["tifffile/src/**"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "tifffile/tifffile.py"
 
 [tool.black]
 line-length = 79
