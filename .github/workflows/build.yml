@@ -1,0 +1,257 @@
+name: Build wheels
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_wheels:
+    name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            arch: x86_64
+            cibw_archs: x86_64
+          # Linux aarch64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            cibw_archs: aarch64
+          # macOS x86_64
+          - os: macos-13
+            arch: x86_64
+            cibw_archs: x86_64
+          # macOS arm64
+          - os: macos-14
+            arch: arm64
+            cibw_archs: arm64
+          # Windows x86_64
+          - os: windows-latest
+            arch: AMD64
+            cibw_archs: AMD64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.22
+        env:
+          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+          CIBW_BEFORE_BUILD: "pip install scikit-build-core>=0.10 nanobind>=2.4.0 numpy"
+          CIBW_TEST_REQUIRES: "numpy pytest"
+          CIBW_TEST_COMMAND: >
+            python -c "
+            import tifffile;
+            print('tifffile', tifffile.__version__);
+            from tifffile.camera import CameraModel, camera_extratags, camera_frame_extratags, read_camera;
+            print('camera module OK');
+            try:
+              from tifffile._tifffile_ext import parse_ifd;
+              print('C++ extension OK');
+            except ImportError:
+              print('C++ extension not available (pure Python)');
+            "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  test_wheels:
+    name: Test ${{ matrix.os }} py${{ matrix.python }}
+    needs: build_wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+            python-tag: "312"
+            artifact: wheels-ubuntu-latest-x86_64
+          - os: macos-14
+            python: "3.12"
+            python-tag: "312"
+            artifact: wheels-macos-14-arm64
+          - os: windows-latest
+            python: "3.12"
+            python-tag: "312"
+            artifact: wheels-windows-latest-AMD64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: wheelhouse
+
+      - name: Install wheel
+        shell: bash
+        run: |
+          pip install wheelhouse/tifffile-*cp${{ matrix.python-tag }}*.whl
+          pip install numpy pytest
+
+      - name: Test C++ extension
+        shell: bash
+        run: |
+          python -c "
+          from tifffile._tifffile_ext import (
+              parse_ifd, parse_ifd_filtered, scan_ifd_chain_file,
+              bulk_extract_tag_values, CppFileReader, CppTiffFormat,
+              selection_to_page_indices, compute_segment_positions,
+          )
+          print('All C++ exports OK')
+          fmt = CppTiffFormat.classic_le()
+          print('TiffFormat classic_le:', fmt)
+          "
+
+      - name: Test camera module
+        shell: bash
+        run: |
+          python -c "
+          import numpy as np, tempfile, os
+          from tifffile import TiffWriter, TiffFile
+          from tifffile.camera import (
+              CameraModel, CameraData, camera_extratags,
+              camera_frame_extratags, read_camera,
+          )
+
+          model = CameraModel.OPENCV
+          intr = [500.0, 500.0, 320.0, 240.0]
+          dist = [-0.1, 0.01, 0.001, -0.001]
+          poses = [[0,0,0,1,0,0,0], [0.1,0.2,0.3,0.9,1,-2,3]]
+          fnames = ['frame_00.png', 'frame_01.png']
+          times = [1700000000.0, 1700000001.0]
+          gps = [[47.6,-122.3,100.0], [47.7,-122.4,105.0]]
+
+          # Bulk mode round-trip
+          tags = camera_extratags(model, 640, 480, intr, dist,
+              np.array(poses), filenames=fnames,
+              timestamps=np.array(times), gps=np.array(gps))
+          f = tempfile.NamedTemporaryFile(suffix='.tif', delete=False)
+          path = f.name; f.close()
+          with TiffWriter(path) as tw:
+              tw.write(np.zeros((2,480,640), dtype='uint8'), extratags=tags,
+                       photometric='minisblack')
+          with TiffFile(path) as tf:
+              cam = read_camera(tf)
+          assert cam.num_frames == 2
+          assert cam.filenames == fnames
+          assert np.allclose(cam.timestamps, times)
+          assert np.allclose(cam.gps, gps)
+          os.unlink(path)
+          print('Bulk mode: OK')
+
+          # Per-IFD mode round-trip
+          f = tempfile.NamedTemporaryFile(suffix='.tif', delete=False)
+          path = f.name; f.close()
+          with TiffWriter(path) as tw:
+              for i in range(2):
+                  tags = camera_frame_extratags(model, 640, 480, intr, dist,
+                      extrinsic=poses[i], filename=fnames[i],
+                      timestamp=times[i], gps=gps[i])
+                  tw.write(np.zeros((480,640), dtype='uint8'), extratags=tags)
+          with TiffFile(path) as tf:
+              cam = read_camera(tf)
+          assert cam.num_frames == 2
+          assert cam.filenames == fnames
+          assert np.allclose(cam.timestamps, times)
+          assert np.allclose(cam.gps, gps)
+          os.unlink(path)
+          print('Per-IFD mode: OK')
+
+          # Bridge methods
+          d = cam.to_transforms_json()
+          assert d['frames'][0]['file_path'] == 'frame_00.png'
+          cam2 = CameraData.from_transforms_json(d)
+          assert cam2.filenames == fnames
+          K, dc = cam.to_opencv()
+          assert K.shape == (3, 3)
+          print('Bridge methods: OK')
+          "
+
+      - name: Test modular imports
+        shell: bash
+        run: |
+          python -c "
+          from tifffile import TiffFile, TiffWriter, TiffPage, TiffTag
+          from tifffile.enums import COMPRESSION, PHOTOMETRIC, PREDICTOR
+          from tifffile.codecs import TiffFormat
+          from tifffile.fileio import FileHandle
+          from tifffile.tags import TiffTags, TiffTagRegistry
+          from tifffile.utils import TiffFileError
+          from tifffile.series import SeriesParserRegistry
+          from tifffile.camera import CameraModel, CameraData
+          from tifffile.gpu import gpu_decode, GpuCodecRegistry
+          print('All module imports OK')
+          "
+
+      - name: Test mmap read
+        shell: bash
+        run: |
+          python -c "
+          import numpy as np, tempfile, os
+          from tifffile import TiffWriter, TiffFile
+
+          # Write a tiled image to exercise mmap path
+          f = tempfile.NamedTemporaryFile(suffix='.tif', delete=False)
+          path = f.name; f.close()
+          data = np.random.randint(0, 255, (256, 256), dtype='uint8')
+          with TiffWriter(path) as tw:
+              tw.write(data, tile=(64, 64))
+          with TiffFile(path) as tf:
+              result = tf.pages.first.asarray()
+          assert np.array_equal(data, result)
+          os.unlink(path)
+          print('mmap tiled read: OK')
+          "
+
+  publish:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist, test_wheels]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

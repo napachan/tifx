@@ -77,8 +77,12 @@ files using private tags 65201-65207 with a COLMAP-compatible convention.
 
 - 18 camera models (COLMAP IDs 0-15 + equirectangular + cubemap)
 - Per-frame extrinsics, filenames, timestamps, and GPS coordinates
+- Two storage modes: **bulk** (all frames in first IFD) or **per-IFD**
+  (each page self-describing with its own complete tags)
 - Bridge methods: ``to_transforms_json`` / ``from_transforms_json`` (NeRF),
   ``to_pycolmap`` / ``from_pycolmap``, ``to_opencv`` / ``from_opencv``
+
+Bulk mode (all frames packed in first IFD):
 
 .. code-block:: python
 
@@ -97,6 +101,30 @@ files using private tags 65201-65207 with a COLMAP-compatible convention.
     )
     with TiffWriter('calibrated.tif') as tw:
         tw.write(images, extratags=tags)
+
+Per-IFD mode (each page carries its own camera parameters):
+
+.. code-block:: python
+
+    from tifffile.camera import camera_frame_extratags
+
+    with TiffWriter('calibrated.tif') as tw:
+        for i in range(N):
+            tags = camera_frame_extratags(
+                model=CameraModel.OPENCV,
+                width=640, height=480,
+                intrinsics=[500.0, 500.0, 320.0, 240.0],
+                distortion=[-0.1, 0.01, 0.001, -0.001],
+                extrinsic=poses[i],
+                filename=f'frame_{i:04d}.png',
+                timestamp=timestamps[i],
+                gps=gps_coords[i],
+            )
+            tw.write(images[i], extratags=tags)
+
+Reading auto-detects the storage mode:
+
+.. code-block:: python
 
     with TiffFile('calibrated.tif') as tif:
         cam = read_camera(tif)
@@ -157,7 +185,7 @@ importable via ``from tifffile import *``.
      - 1,251
      - TiffTag, TiffTags, TiffTagRegistry
    * - ``camera.py``
-     - 826
+     - 1,070
      - Camera calibration, CameraData, bridge methods
    * - ``gpu.py``
      - 694

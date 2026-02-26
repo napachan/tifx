@@ -8,10 +8,17 @@ Tag allocation (private reusable range 65201-65207):
     65201 (LONG × 3): camera model ID, image width, image height
     65202 (DOUBLE × 4): intrinsics [fx, fy, cx, cy]
     65203 (DOUBLE × 12): distortion coefficients, zero-padded
-    65204 (DOUBLE × N*7): per-frame extrinsics [qx, qy, qz, qw, tx, ty, tz]
-    65205 (BYTE): per-frame source filenames, UTF-8 null-separated
-    65206 (DOUBLE × N): per-frame Unix epoch timestamps
-    65207 (DOUBLE × N*3): per-frame GPS [latitude, longitude, altitude]
+    65204 (DOUBLE × N*7 or 7): extrinsics [qx, qy, qz, qw, tx, ty, tz]
+    65205 (BYTE): source filenames, UTF-8 null-separated (bulk) or single
+    65206 (DOUBLE × N or 1): Unix epoch timestamps
+    65207 (DOUBLE × N*3 or 3): GPS [latitude, longitude, altitude]
+
+Two storage modes:
+    Bulk (first IFD only): camera_extratags() writes all N frames into the
+        first IFD with writeonce=True. Tags 65204-65207 hold packed arrays.
+    Per-IFD: camera_frame_extratags() writes one frame per page with
+        writeonce=False. Each page is self-describing with its own complete
+        set of tags. read_camera() auto-detects the mode.
 
 Extrinsics convention (COLMAP-compatible):
     Quaternion in [qx, qy, qz, qw] order (Eigen convention).
@@ -667,8 +674,152 @@ def camera_extratags(
     return tags
 
 
+def camera_frame_extratags(
+    model: CameraModel | int,
+    width: int,
+    height: int,
+    intrinsics: Sequence[float],
+    distortion: Sequence[float] | None = None,
+    extrinsic: Sequence[float] | None = None,
+    *,
+    filename: str | None = None,
+    timestamp: float | None = None,
+    gps: Sequence[float] | None = None,
+) -> list[tuple[int, int, int, bytes, bool]]:
+    """Build per-page TIFF extratags for a single frame.
+
+    Each page carries a complete set of camera tags with writeonce=False.
+    Call this once per frame and pass the result to each ``tw.write()`` call.
+
+    Parameters:
+        model:
+            Camera model ID. See :py:class:`CameraModel`.
+        width:
+            Image width in pixels.
+        height:
+            Image height in pixels.
+        intrinsics:
+            Intrinsic parameters [fx, fy, cx, cy] (or [f, cx, cy] for
+            single-focal models).
+        distortion:
+            Distortion coefficients. Zero-padded to 12. Default all zeros.
+        extrinsic:
+            Single pose [qx, qy, qz, qw, tx, ty, tz].
+            Default is identity pose.
+        filename:
+            Source filename for this frame.
+        timestamp:
+            Unix epoch seconds for this frame.
+        gps:
+            GPS coordinates [latitude, longitude, altitude] for this frame.
+
+    Returns:
+        List of extratag tuples for :py:meth:`TiffWriter.write`.
+
+    """
+    model = CameraModel(model)
+
+    # normalize intrinsics
+    intr = list(intrinsics)
+    if SINGLE_FOCAL.get(model, False) and len(intr) == 3:
+        intr = [intr[0], intr[0], intr[1], intr[2]]
+    if len(intr) != NUM_INTRINSICS:
+        msg = f'expected {NUM_INTRINSICS} intrinsics, got {len(intr)}'
+        raise ValueError(msg)
+
+    # normalize distortion
+    if distortion is None:
+        dist = [0.0] * NUM_DISTORTION
+    else:
+        dist = list(distortion)
+        expected = DISTORTION_PARAMS.get(model, 0)
+        if len(dist) < expected:
+            msg = (
+                f'model {model.name} expects at least '
+                f'{expected} distortion params, got {len(dist)}'
+            )
+            raise ValueError(msg)
+        if len(dist) > NUM_DISTORTION:
+            msg = (
+                f'too many distortion params: '
+                f'{len(dist)} > {NUM_DISTORTION}'
+            )
+            raise ValueError(msg)
+        dist.extend([0.0] * (NUM_DISTORTION - len(dist)))
+
+    # normalize single extrinsic
+    if extrinsic is None:
+        ext = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    else:
+        ext = list(extrinsic)
+        if len(ext) != NUM_EXTRINSICS:
+            msg = (
+                f'extrinsic must have {NUM_EXTRINSICS} values, '
+                f'got {len(ext)}'
+            )
+            raise ValueError(msg)
+
+    # writeonce=False: written to each page
+    tags: list[tuple[int, int, int, bytes, bool]] = [
+        (
+            TAG_CAMERA_MODEL,
+            4,  # LONG
+            3,
+            struct.pack('3I', int(model), width, height),
+            False,
+        ),
+        (
+            TAG_INTRINSICS,
+            12,  # DOUBLE
+            NUM_INTRINSICS,
+            struct.pack(f'{NUM_INTRINSICS}d', *intr),
+            False,
+        ),
+        (
+            TAG_DISTORTION,
+            12,  # DOUBLE
+            NUM_DISTORTION,
+            struct.pack(f'{NUM_DISTORTION}d', *dist),
+            False,
+        ),
+        (
+            TAG_EXTRINSICS,
+            12,  # DOUBLE
+            NUM_EXTRINSICS,
+            struct.pack(f'{NUM_EXTRINSICS}d', *ext),
+            False,
+        ),
+    ]
+
+    if filename is not None:
+        blob = filename.encode('utf-8') + b'\x00'
+        tags.append((TAG_FILENAMES, 1, len(blob), blob, False))
+
+    if timestamp is not None:
+        tags.append(
+            (TAG_TIMESTAMPS, 12, 1, struct.pack('d', timestamp), False)
+        )
+
+    if gps is not None:
+        gps_list = list(gps)
+        if len(gps_list) != NUM_GPS:
+            msg = f'gps must have {NUM_GPS} values, got {len(gps_list)}'
+            raise ValueError(msg)
+        tags.append(
+            (TAG_GPS, 12, NUM_GPS, struct.pack(f'{NUM_GPS}d', *gps_list),
+             False)
+        )
+
+    return tags
+
+
 def read_camera(tif: Any) -> CameraData:
     """Read camera calibration data from TIFF file.
+
+    Auto-detects storage mode:
+    - Bulk: all data in first IFD (tag 65204 has N*7 values).
+    - Per-IFD: each page has its own tags (tag 65204 has 7 values and
+      page 1 also has tag 65201).
 
     Parameters:
         tif:
@@ -705,6 +856,22 @@ def read_camera(tif: Any) -> CameraData:
     distortion = numpy.array(tags[TAG_DISTORTION].value, dtype='float64')
 
     ext_values = numpy.array(tags[TAG_EXTRINSICS].value, dtype='float64')
+
+    # detect per-IFD mode: extrinsics has exactly 7 values (one frame)
+    # and there are multiple pages with camera tags
+    per_ifd = False
+    if pages is not None and ext_values.size == NUM_EXTRINSICS:
+        n_pages = len(pages)
+        if n_pages > 1:
+            page1 = pages[1]
+            if TAG_CAMERA_MODEL in page1.tags:
+                per_ifd = True
+
+    if per_ifd:
+        return _read_camera_per_ifd(pages, model, width, height,
+                                    intrinsics, distortion)
+
+    # bulk mode: all data in first IFD
     extrinsics = ext_values.reshape(-1, NUM_EXTRINSICS)
 
     filenames = None
@@ -736,6 +903,83 @@ def read_camera(tif: Any) -> CameraData:
         filenames=filenames,
         timestamps=timestamps,
         gps=gps,
+    )
+
+
+def _read_camera_per_ifd(
+    pages: Any,
+    model: CameraModel,
+    width: int,
+    height: int,
+    intrinsics: numpy.ndarray,
+    distortion: numpy.ndarray,
+) -> CameraData:
+    """Read per-IFD camera tags from all pages.
+
+    Optimized to avoid per-page numpy array creation.
+    Uses flat buffer + struct for extrinsics/GPS, direct float for timestamps.
+    """
+    n = len(pages)
+    # pre-allocate flat buffers
+    ext_flat = numpy.empty(n * NUM_EXTRINSICS, dtype='float64')
+    gps_flat = numpy.empty(n * NUM_GPS, dtype='float64')
+    ts_flat = numpy.empty(n, dtype='float64')
+    filenames: list[str] = []
+    has_filenames = False
+    has_timestamps = False
+    has_gps = False
+
+    # local name lookups for hot loop
+    _TAG_EXT = TAG_EXTRINSICS
+    _TAG_FN = TAG_FILENAMES
+    _TAG_TS = TAG_TIMESTAMPS
+    _TAG_GPS = TAG_GPS
+    _NUM_EXT = NUM_EXTRINSICS
+    _NUM_GPS = NUM_GPS
+
+    for i in range(n):
+        t = pages[i].tags
+
+        # extrinsics: copy tuple values directly into flat buffer
+        vals = t[_TAG_EXT].value
+        base = i * _NUM_EXT
+        for j in range(_NUM_EXT):
+            ext_flat[base + j] = vals[j]
+
+        if _TAG_FN in t:
+            raw = bytes(t[_TAG_FN].value)
+            filenames.append(raw.rstrip(b'\x00').decode('utf-8'))
+            has_filenames = True
+        else:
+            filenames.append('')
+
+        if _TAG_TS in t:
+            vals = t[_TAG_TS].value
+            ts_flat[i] = float(vals[0]) if hasattr(vals, '__len__') else float(vals)
+            has_timestamps = True
+        else:
+            ts_flat[i] = 0.0
+
+        if _TAG_GPS in t:
+            gvals = t[_TAG_GPS].value
+            gbase = i * _NUM_GPS
+            for j in range(_NUM_GPS):
+                gps_flat[gbase + j] = gvals[j]
+            has_gps = True
+        else:
+            gbase = i * _NUM_GPS
+            gps_flat[gbase:gbase + _NUM_GPS] = 0.0
+
+    return CameraData(
+        model=model,
+        width=width,
+        height=height,
+        intrinsics=intrinsics,
+        distortion=distortion,
+        extrinsics=ext_flat.reshape(n, _NUM_EXT),
+        filenames=filenames if has_filenames else None,
+        timestamps=ts_flat if has_timestamps else None,
+        gps=gps_flat.reshape(n, _NUM_GPS) if has_gps else None,
     )
 
 
