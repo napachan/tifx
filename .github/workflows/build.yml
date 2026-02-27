@@ -53,17 +53,17 @@ jobs:
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           CIBW_BEFORE_BUILD: "pip install scikit-build-core>=0.10 nanobind>=2.4.0 numpy"
           CIBW_TEST_REQUIRES: "numpy pytest"
-          CIBW_TEST_COMMAND: >
+          CIBW_TEST_COMMAND: |
             python -c "
-            import tifffile;
-            print('tifffile', tifffile.__version__);
-            from tifffile.camera import CameraModel, camera_extratags, camera_frame_extratags, read_camera;
-            print('camera module OK');
+            import tifffile
+            print('tifffile', tifffile.__version__)
+            from tifffile.camera import CameraModel, camera_extratags, camera_frame_extratags, read_camera
+            print('camera module OK')
             try:
-              from tifffile._tifffile_ext import parse_ifd;
-              print('C++ extension OK');
+                from tifffile._tifffile_ext import parse_ifd
+                print('C++ extension OK')
             except ImportError:
-              print('C++ extension not available (pure Python)');
+                print('C++ extension not available (pure Python)')
             "
 
       - uses: actions/upload-artifact@v4
@@ -215,7 +215,7 @@ jobs:
           from tifffile.utils import TiffFileError
           from tifffile.series import SeriesParserRegistry
           from tifffile.camera import CameraModel, CameraData
-          from tifffile.gpu import gpu_decode, GpuCodecRegistry
+          from tifffile.gpu import read_to_gpu, GpuCodecRegistry
           print('All module imports OK')
           "
 
