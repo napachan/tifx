@@ -28,8 +28,8 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: aarch64
             cibw_archs: aarch64
-          # macOS x86_64
-          - os: macos-13
+          # macOS x86_64 (cross-compile on ARM via Rosetta 2)
+          - os: macos-14
             arch: x86_64
             cibw_archs: x86_64
           # macOS arm64
