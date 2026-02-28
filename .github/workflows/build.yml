@@ -32,6 +32,7 @@ jobs:
           - os: macos-14
             arch: x86_64
             cibw_archs: x86_64
+            cibw_env: "MACOSX_DEPLOYMENT_TARGET=10.13"
           # macOS arm64
           - os: macos-14
             arch: arm64
@@ -50,6 +51,7 @@ jobs:
           CIBW_BUILD: "cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_*"
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_ENVIRONMENT: ${{ matrix.cibw_env }}
           CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
           CIBW_BEFORE_BUILD: "pip install scikit-build-core>=0.10 nanobind>=2.4.0 numpy"
           CIBW_TEST_REQUIRES: "numpy pytest"
