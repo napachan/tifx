@@ -239,6 +239,78 @@ jobs:
           print('mmap tiled read: OK')
           "
 
+      - name: Test GPU module (CPU-only torch, Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -c "
+          import torch
+          print('torch', torch.__version__)
+
+          from tifffile.gpu import (
+              parse_device, numpy_to_tensor, tensor_to_numpy,
+              GpuCodecRegistry, GpuEncoderRegistry,
+              _get_torch_dtype_map, _is_cuda_tensor,
+          )
+
+          # parse_device
+          assert parse_device(None) is None
+          dev = parse_device('cpu')
+          assert dev == torch.device('cpu')
+          print('parse_device: OK')
+
+          # dtype map probing
+          dtype_map = _get_torch_dtype_map()
+          import numpy as np
+          assert np.dtype('float32') in dtype_map
+          assert np.dtype('uint8') in dtype_map
+          assert np.dtype('int64') in dtype_map
+          print(f'dtype map: {len(dtype_map)} dtypes supported')
+
+          # numpy <-> tensor round-trip on CPU
+          arr = np.random.rand(4, 8).astype('float32')
+          t = numpy_to_tensor(arr, dev)
+          assert t.shape == (4, 8)
+          assert t.device == dev
+          back = tensor_to_numpy(t)
+          assert np.array_equal(arr, back)
+          print('numpy_to_tensor round-trip: OK')
+
+          # unsigned dtype handling
+          for dt in ['uint8', 'uint16', 'uint32']:
+              a = np.arange(10, dtype=dt)
+              t = numpy_to_tensor(a, dev)
+              assert t.shape == (10,)
+          print('unsigned dtypes: OK')
+
+          # _is_cuda_tensor
+          assert not _is_cuda_tensor(t)
+          assert not _is_cuda_tensor(arr)
+          print('_is_cuda_tensor: OK')
+
+          # codec registries return None without GPU libs
+          assert GpuCodecRegistry.get(50000) is None  # zstd
+          assert GpuCodecRegistry.get(7) is None       # JPEG
+          assert GpuCodecRegistry.get(99999) is None   # unknown
+          print('GpuCodecRegistry (no GPU libs): OK')
+
+          assert GpuEncoderRegistry.get(50000) is None
+          assert GpuEncoderRegistry.get(99999) is None
+          print('GpuEncoderRegistry (no GPU libs): OK')
+
+          # gpu_cumsum_predictor on CPU tensor
+          from tifffile.gpu import gpu_cumsum_predictor, gpu_delta_encode
+          data = torch.tensor([1, 2, 3, 4, 5], dtype=torch.float32)
+          delta = gpu_delta_encode(data)
+          assert delta.tolist() == [1, 1, 1, 1, 1]
+          restored = gpu_cumsum_predictor(delta.clone())
+          assert restored.tolist() == [1, 2, 3, 4, 5]
+          print('predictor encode/decode round-trip: OK')
+
+          print('All GPU module tests passed')
+          "
+
   publish:
     name: Publish to PyPI
     needs: [build_wheels, build_sdist, test_wheels]
