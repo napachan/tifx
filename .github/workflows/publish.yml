@@ -121,7 +121,7 @@ jobs:
       - name: Install wheel
         shell: bash
         run: |
-          pip install wheelhouse/tifffile-*cp${{ matrix.python-tag }}*.whl
+          pip install wheelhouse/tifx-*cp${{ matrix.python-tag }}*.whl
           pip install numpy pytest
 
       - name: Test C++ extension
