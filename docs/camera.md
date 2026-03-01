@@ -4,7 +4,10 @@ Store and retrieve camera intrinsics, distortion coefficients, and per-frame
 extrinsics in TIFF tags using a COLMAP-compatible convention.
 
 ```python
-from tifffile.camera import CameraModel, CameraData, camera_extratags, read_camera
+from tifffile.camera import (
+    CameraModel, CameraData,
+    camera_extratags, camera_frame_extratags, read_camera,
+)
 ```
 
 ## Why
@@ -14,22 +17,32 @@ calibration (intrinsics + distortion + per-frame extrinsics). OME-TIFF only
 provides 5 numeric fields per plane (PositionX/Y/Z, DeltaT, ExposureTime) and
 has no concept of lens distortion or rotation quaternions.
 
-This module fills that gap by packing calibration data into four private TIFF
-tags in the reusable range (65201-65204). The convention is fully
+This module fills that gap by packing calibration data into seven private TIFF
+tags in the reusable range (65201-65207). The convention is fully
 COLMAP-compatible: same model IDs, same parameter order, same quaternion layout.
 
 ## Tag Layout
 
-All four tags are written to the **first IFD only** (`writeonce=True`).
-This works with any compression mode since tags are stored in the IFD header,
-not in the image data segments.
+Two storage modes are supported:
 
-| Tag   | TIFF Type  | Count | Contents                                     |
-|-------|------------|-------|----------------------------------------------|
-| 65201 | LONG (4)   | 3     | `[model_id, image_width, image_height]`      |
-| 65202 | DOUBLE (12)| 4     | `[fx, fy, cx, cy]`                           |
-| 65203 | DOUBLE (12)| 12    | distortion coefficients, zero-padded to 12   |
-| 65204 | DOUBLE (12)| N * 7 | per-frame extrinsics, 7 values per frame     |
+- **Bulk mode** (default): All tags are written to the **first IFD only**
+  (`writeonce=True`). Tags 65204-65207 hold packed arrays for all N frames.
+- **Per-IFD mode**: Each page carries a complete set of tags
+  (`writeonce=False`), making each page self-describing with its own pose,
+  filename, timestamp, and GPS.
+
+Both modes work with any compression since tags are stored in the IFD header,
+not in the image data segments. `read_camera()` auto-detects the storage mode.
+
+| Tag   | TIFF Type  | Bulk Count | Per-IFD Count | Contents                                     |
+|-------|------------|------------|---------------|----------------------------------------------|
+| 65201 | LONG (4)   | 3          | 3             | `[model_id, image_width, image_height]`      |
+| 65202 | DOUBLE (12)| 4          | 4             | `[fx, fy, cx, cy]`                           |
+| 65203 | DOUBLE (12)| 12         | 12            | distortion coefficients, zero-padded to 12   |
+| 65204 | DOUBLE (12)| N * 7      | 7             | per-frame extrinsics, 7 values per frame     |
+| 65205 | BYTE (1)   | variable   | variable      | source filenames, UTF-8 null-separated       |
+| 65206 | DOUBLE (12)| N          | 1             | Unix epoch timestamps                        |
+| 65207 | DOUBLE (12)| N * 3      | 3             | GPS `[latitude, longitude, altitude]`        |
 
 **Tag 65201 (Camera Model):** Three unsigned 32-bit integers. The model ID
 maps to a `CameraModel` enum value (see table below). Width and height are the
@@ -45,8 +58,18 @@ lat_offset]`. For cubemap: `[face_size, 0, 0, 0]`.
 coefficients depends on the camera model (see table below). Unused slots are
 zero-padded. Fixed length avoids IFD size ambiguity.
 
-**Tag 65204 (Extrinsics):** `N * 7` 64-bit floats, where N is the number of
-frames. Each frame has 7 values: `[qx, qy, qz, qw, tx, ty, tz]`.
+**Tag 65204 (Extrinsics):** In bulk mode, `N * 7` 64-bit floats where N is the
+number of frames. In per-IFD mode, exactly 7 values for one frame. Each frame
+has 7 values: `[qx, qy, qz, qw, tx, ty, tz]`.
+
+**Tag 65205 (Filenames):** UTF-8 encoded source filenames, null-separated
+(bulk) or null-terminated (per-IFD). Optional.
+
+**Tag 65206 (Timestamps):** 64-bit float Unix epoch seconds. N values in bulk
+mode, 1 value in per-IFD mode. Optional.
+
+**Tag 65207 (GPS):** 64-bit float `[latitude, longitude, altitude]` per frame.
+`N * 3` values in bulk mode, 3 values in per-IFD mode. Optional.
 
 ## Extrinsics Convention
 
@@ -99,9 +122,10 @@ intrinsics `[fx, fy, cx, cy]`.
 
 ## API Reference
 
-### `camera_extratags()`
+### `camera_extratags()` (Bulk Mode)
 
-Build TIFF extratag tuples for `TiffWriter.write()`.
+Build TIFF extratag tuples for `TiffWriter.write()`. All frames are packed
+into the first IFD with `writeonce=True`.
 
 ```python
 def camera_extratags(
@@ -111,6 +135,10 @@ def camera_extratags(
     intrinsics: Sequence[float],
     distortion: Sequence[float] | None = None,
     extrinsics: numpy.ndarray | Sequence[Sequence[float]] | None = None,
+    *,
+    filenames: Sequence[str] | None = None,
+    timestamps: numpy.ndarray | Sequence[float] | None = None,
+    gps: numpy.ndarray | Sequence[Sequence[float]] | None = None,
 ) -> list[tuple[int, int, int, bytes, bool]]
 ```
 
@@ -124,6 +152,10 @@ def camera_extratags(
   values as the model requires. Zero-padded to 12. Defaults to all zeros.
 - `extrinsics` &mdash; `(N, 7)` array of `[qx, qy, qz, qw, tx, ty, tz]`
   per frame. Defaults to a single identity pose.
+- `filenames` &mdash; Per-frame source filenames. Encoded as UTF-8,
+  null-separated.
+- `timestamps` &mdash; Per-frame Unix epoch seconds as `(N,)` float64.
+- `gps` &mdash; Per-frame GPS as `(N, 3)` float64 `[lat, lon, alt]`.
 
 **Returns:** List of extratag tuples to pass as `extratags=` to
 `TiffWriter.write()`.
@@ -131,9 +163,45 @@ def camera_extratags(
 **Raises:** `ValueError` for wrong intrinsics count, insufficient distortion
 params, or wrong extrinsics shape.
 
+### `camera_frame_extratags()` (Per-IFD Mode)
+
+Build per-page TIFF extratags for a single frame. Each page carries a
+complete set of camera tags with `writeonce=False`. Call this once per frame.
+
+```python
+def camera_frame_extratags(
+    model: CameraModel | int,
+    width: int,
+    height: int,
+    intrinsics: Sequence[float],
+    distortion: Sequence[float] | None = None,
+    extrinsic: Sequence[float] | None = None,
+    *,
+    filename: str | None = None,
+    timestamp: float | None = None,
+    gps: Sequence[float] | None = None,
+) -> list[tuple[int, int, int, bytes, bool]]
+```
+
+**Parameters:**
+
+- `model` &mdash; Camera model ID.
+- `width`, `height` &mdash; Image dimensions in pixels.
+- `intrinsics` &mdash; `[fx, fy, cx, cy]` or `[f, cx, cy]` for single-focal.
+- `distortion` &mdash; Distortion coefficients. Zero-padded to 12.
+- `extrinsic` &mdash; Single pose `[qx, qy, qz, qw, tx, ty, tz]`. Note:
+  singular `extrinsic`, not `extrinsics`. Defaults to identity.
+- `filename` &mdash; Source filename for this frame.
+- `timestamp` &mdash; Unix epoch seconds for this frame.
+- `gps` &mdash; GPS `[latitude, longitude, altitude]` for this frame.
+
+**Returns:** List of extratag tuples for `TiffWriter.write()`.
+
 ### `read_camera()`
 
-Read camera calibration data from a TIFF file.
+Read camera calibration data from a TIFF file. Auto-detects the storage mode
+(bulk vs per-IFD) based on extrinsics count and presence of camera tags on
+subsequent pages.
 
 ```python
 def read_camera(tif: TiffFile | TiffPage) -> CameraData
@@ -147,19 +215,23 @@ Accepts either a `TiffFile` (reads from first page) or a `TiffPage` directly.
 
 Dataclass returned by `read_camera()`.
 
-| Field        | Type             | Description                                    |
-|--------------|------------------|------------------------------------------------|
-| `model`      | `CameraModel`    | Camera model enum                              |
-| `width`      | `int`            | Image width in pixels                          |
-| `height`     | `int`            | Image height in pixels                         |
-| `intrinsics` | `ndarray (4,)`   | `[fx, fy, cx, cy]` as float64                  |
-| `distortion` | `ndarray (12,)`  | Distortion coefficients, zero-padded, float64  |
-| `extrinsics` | `ndarray (N, 7)` | Per-frame `[qx, qy, qz, qw, tx, ty, tz]`     |
+| Field        | Type                    | Description                                    |
+|--------------|-------------------------|------------------------------------------------|
+| `model`      | `CameraModel`           | Camera model enum                              |
+| `width`      | `int`                   | Image width in pixels                          |
+| `height`     | `int`                   | Image height in pixels                         |
+| `intrinsics` | `ndarray (4,)`          | `[fx, fy, cx, cy]` as float64                  |
+| `distortion` | `ndarray (12,)`         | Distortion coefficients, zero-padded, float64  |
+| `extrinsics` | `ndarray (N, 7)`        | Per-frame `[qx, qy, qz, qw, tx, ty, tz]`     |
+| `filenames`  | `list[str] \| None`     | Per-frame source filenames                     |
+| `timestamps` | `ndarray (N,) \| None`  | Per-frame Unix epoch seconds, float64          |
+| `gps`        | `ndarray (N,3) \| None` | Per-frame `[lat, lon, alt]`, float64           |
 
 **Properties:**
 
 - `num_frames` &mdash; Number of frames (rows in extrinsics).
 - `fx`, `fy`, `cx`, `cy` &mdash; Individual intrinsic values as `float`.
+- `K` &mdash; 3x3 intrinsic matrix as float64.
 
 **Methods:**
 
@@ -167,6 +239,9 @@ Dataclass returned by `read_camera()`.
   converted from the quaternions.
 - `translation_vectors()` &mdash; Returns `(N, 3)` float64 translation vectors
   (copy of extrinsics columns 4-6).
+- `cam_from_world_matrix(frame)` &mdash; 4x4 cam-from-world transform.
+- `world_from_cam_matrix(frame)` &mdash; 4x4 world-from-cam (inverse).
+- `camera_positions()` &mdash; World-space camera positions as `(N, 3)`.
 
 ### `CameraModel`
 
@@ -247,6 +322,28 @@ tags = camera_extratags(
 )
 ```
 
+### Per-IFD mode (each page self-describing)
+
+```python
+import numpy as np
+from tifffile import TiffWriter
+from tifffile.camera import CameraModel, camera_frame_extratags
+
+with TiffWriter('per_ifd.tif') as tw:
+    for i in range(100):
+        tags = camera_frame_extratags(
+            model=CameraModel.OPENCV,
+            width=640, height=480,
+            intrinsics=[525.0, 525.0, 319.5, 239.5],
+            distortion=[-0.28, 0.07, 0.0008, -0.0003],
+            extrinsic=[0, 0, 0, 1, 0, 0, 0],  # identity
+            filename=f'frame_{i:04d}.png',
+            timestamp=1700000000.0 + i,
+            gps=[47.6, -122.3, 100.0],
+        )
+        tw.write(images[i], extratags=tags)
+```
+
 ### With compression
 
 Camera tags are in the IFD header, not in image data. They work with any
@@ -284,15 +381,18 @@ doubles. This avoids ambiguity when parsing &mdash; readers don't need to know
 the camera model to determine field boundaries. Zero-padding is cheap (96 bytes
 of zeros at most).
 
-**Private tag range.** Tags 65201-65204 are in the TIFF "reusable" private
+**Private tag range.** Tags 65201-65207 are in the TIFF "reusable" private
 range (65000-65535). These codes are not registered with any standards body and
 may collide with other software using the same range. The tags are
 self-describing (known type and count), so collisions are detectable.
 
-**First-page-only storage.** All tags use `writeonce=True`, meaning they appear
-only in the first IFD. This keeps multi-page TIFFs clean &mdash; calibration is
-a per-file property, not per-page. The extrinsics array maps frames by index:
-frame `i` corresponds to `extrinsics[i]`.
+**Two storage modes.** Bulk mode packs all N frames into the first IFD
+(`writeonce=True`), keeping multi-page TIFFs clean when calibration is a
+per-file property. Per-IFD mode writes each page with its own complete tags
+(`writeonce=False`), making each page self-describing &mdash; useful when pages
+are added incrementally or when per-page metadata (GPS, timestamps) varies.
+`read_camera()` auto-detects the mode by checking whether the extrinsics tag
+has 7 values (per-IFD) or N*7 values (bulk).
 
 **COLMAP compatibility.** Model IDs 0-15 match COLMAP's `camera_models.h`
 exactly. Quaternion order `[qx, qy, qz, qw]` matches COLMAP/Eigen convention

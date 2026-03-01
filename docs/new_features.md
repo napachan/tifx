@@ -1,4 +1,4 @@
-# New Features in tifffile (Fork)
+# New Features in tifx (tifffile Fork)
 
 This document describes all features added to this fork of the tifffile library
 beyond the original upstream monolithic `tifffile.py` (~24,000 lines). The fork
@@ -195,7 +195,7 @@ source.
 
 ### Overview
 
-`tifffile/camera.py` (826 lines) is an entirely new module for storing and
+`tifffile/camera.py` (1,070 lines) is an entirely new module for storing and
 retrieving full computer-vision camera calibration data in TIFF files. There is
 no existing TIFF standard for this -- OME-TIFF provides only 5 numeric fields
 per plane and has no concept of lens distortion or rotation quaternions.
@@ -203,19 +203,28 @@ per plane and has no concept of lens distortion or rotation quaternions.
 The module uses 7 private TIFF tags (65201-65207) with a COLMAP-compatible
 convention: same model IDs, same parameter order, same quaternion layout.
 
+### Storage Modes
+
+Two storage modes are supported:
+
+- **Bulk mode** (`camera_extratags()`): All N frames packed into the first IFD
+  with `writeonce=True`. Tags 65204-65207 hold packed arrays.
+- **Per-IFD mode** (`camera_frame_extratags()`): Each page carries a complete
+  set of tags with `writeonce=False`, making each page self-describing.
+
+`read_camera()` auto-detects the mode.
+
 ### Tag Layout
 
-All tags are written to the first IFD only (`writeonce=True`).
-
-| Tag | TIFF Type | Count | Contents |
-|---|---|---|---|
-| 65201 | LONG (4) | 3 | `[model_id, image_width, image_height]` |
-| 65202 | DOUBLE (12) | 4 | `[fx, fy, cx, cy]` intrinsics |
-| 65203 | DOUBLE (12) | 12 | distortion coefficients, zero-padded |
-| 65204 | DOUBLE (12) | N * 7 | per-frame extrinsics `[qx, qy, qz, qw, tx, ty, tz]` |
-| 65205 | BYTE (1) | variable | per-frame source filenames, UTF-8 null-separated |
-| 65206 | DOUBLE (12) | N | per-frame Unix epoch timestamps |
-| 65207 | DOUBLE (12) | N * 3 | per-frame GPS `[latitude, longitude, altitude]` |
+| Tag | TIFF Type | Bulk Count | Per-IFD Count | Contents |
+|---|---|---|---|---|
+| 65201 | LONG (4) | 3 | 3 | `[model_id, image_width, image_height]` |
+| 65202 | DOUBLE (12) | 4 | 4 | `[fx, fy, cx, cy]` intrinsics |
+| 65203 | DOUBLE (12) | 12 | 12 | distortion coefficients, zero-padded |
+| 65204 | DOUBLE (12) | N * 7 | 7 | per-frame extrinsics `[qx, qy, qz, qw, tx, ty, tz]` |
+| 65205 | BYTE (1) | variable | variable | source filenames, UTF-8 null-separated |
+| 65206 | DOUBLE (12) | N | 1 | Unix epoch timestamps |
+| 65207 | DOUBLE (12) | N * 3 | 3 | GPS `[latitude, longitude, altitude]` |
 
 ### CameraModel Enum
 
@@ -297,17 +306,21 @@ Methods:
 ### Key Functions
 
 - `camera_extratags(model, width, height, intrinsics, distortion, extrinsics, *, filenames, timestamps, gps)` --
-  builds extratag tuples for `TiffWriter.write()`.
+  builds bulk-mode extratag tuples (all frames in first IFD).
+- `camera_frame_extratags(model, width, height, intrinsics, distortion, extrinsic, *, filename, timestamp, gps)` --
+  builds per-IFD extratag tuples (one frame per page, each page self-describing).
 - `read_camera(tif)` -- reads `CameraData` from a `TiffFile` or `TiffPage`.
+  Auto-detects bulk vs per-IFD mode.
 
-### Usage Example
+### Usage Examples
+
+Bulk mode (all frames in first IFD):
 
 ```python
 import numpy as np
 from tifffile import TiffWriter, TiffFile
 from tifffile.camera import CameraModel, camera_extratags, read_camera
 
-# Write
 images = np.random.randint(0, 255, (10, 480, 640), dtype='uint8')
 poses = np.zeros((10, 7), dtype='float64')
 poses[:, 3] = 1.0  # identity rotation
@@ -317,11 +330,33 @@ tags = camera_extratags(
     intrinsics=[500.0, 500.0, 320.0, 240.0],
     distortion=[-0.1, 0.01, 0.001, -0.001],
     extrinsics=poses,
+    filenames=[f'frame_{i:04d}.png' for i in range(10)],
 )
 with TiffWriter('calibrated.tif') as tw:
     tw.write(images, extratags=tags)
+```
 
-# Read
+Per-IFD mode (each page self-describing):
+
+```python
+from tifffile.camera import camera_frame_extratags
+
+with TiffWriter('per_ifd.tif') as tw:
+    for i in range(10):
+        tags = camera_frame_extratags(
+            model=CameraModel.OPENCV,
+            width=640, height=480,
+            intrinsics=[500.0, 500.0, 320.0, 240.0],
+            distortion=[-0.1, 0.01, 0.001, -0.001],
+            extrinsic=poses[i],
+            filename=f'frame_{i:04d}.png',
+        )
+        tw.write(images[i], extratags=tags)
+```
+
+Reading (auto-detects mode):
+
+```python
 with TiffFile('calibrated.tif') as tif:
     cam = read_camera(tif)
     print(cam.model, cam.fx, cam.num_frames)
@@ -674,7 +709,7 @@ computation in `TiffPageSeries`.
 | `utils.py` | 1,763 | Helper functions, TiffFileError |
 | `fileio.py` | 1,455 | FileHandle (mmap), FileCache, NullContext, Timer, StoredShape |
 | `tags.py` | 1,251 | TiffTag, TiffTags, TiffTagRegistry |
-| `camera.py` | 826 | Camera calibration: CameraModel, CameraData, extratags, bridges |
+| `camera.py` | 1,070 | Camera calibration: CameraModel, CameraData, extratags (bulk + per-IFD), bridges |
 | `gpu.py` | 694 | GPU acceleration: read/write, codec registries, predictor ops |
 | `decoders.py` | 621 | build_decode_closure with C++ segment positions |
 | `codecs.py` | 434 | TiffFormat, CompressionCodec, PredictorCodec |
